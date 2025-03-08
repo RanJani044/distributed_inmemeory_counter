@@ -35,3 +35,20 @@ Instructions to Run Nodes and Tests:
 - If you want to add a new node dynamically to the system, you can specify the -newnode flag along with the port of the new node:
     go run main.go -port=8080 -peers=8081,8082 -newnode=8083
 - This will start a node on port 8080, register peers at ports 8081 and 8082, and dynamically add a new node at port 8083.
+
+
+
+How does your system handle network partitions?
+- In the event of a network partition, the system will continue to operate as normal on the isolated partition.
+- The nodes within the partition can still increment their counters independently.
+- Once the network partition is resolved, the system will propagate any missing increments to the previously isolated nodes through the increment API. 
+- This ensures eventual consistency, although it does not guarantee immediate consistency after a partition is resolved.
+
+- If a node can't communicate with its peers for a while, it will eventually propagate any increments once communication is restored.
+- However, during the partition, nodes may have divergent counter values, which will be reconciled once the partition is resolved.
+
+What are the limitations of your design?
+- Eventual Consistency: The system guarantees eventual consistency but does not provide strong consistency. This means there may be temporary discrepancies in the counter values across nodes, especially during network partitions or failures.
+- Failure Handling: If a node crashes or becomes unreachable for an extended period, the system will eventually remove it from the peer list. However, the system does not offer fault tolerance mechanisms such as leader election or replication for recovery.
+- No Retry Logic: In the current design, if an increment propagation fails (e.g., if the peer node is unreachable), the system does not retry the operation. It only removes the peer from the list, which may lead to inconsistencies if the peer was temporarily unavailable.
+- No Centralized Coordination: There is no centralized coordination between nodes. Each node is essentially independent, and while they can communicate and synchronize counters, there is no single point of truth.
