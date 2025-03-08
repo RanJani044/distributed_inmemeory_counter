@@ -36,7 +36,24 @@ Instructions to Run Nodes and Tests:
     go run main.go -port=8080 -peers=8081,8082 -newnode=8083
 - This will start a node on port 8080, register peers at ports 8081 and 8082, and dynamically add a new node at port 8083.
 
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ API
+- POST /increment
+   Increments the local counter and propagates the increment to peers.
+   Example:
+   curl -X POST http://localhost:9090/increment
+  
+- GET /count
+  Returns the current counter value.
+  Example:
+  curl http://localhost:9090/count
 
+- GET /health
+  Health check endpoint. Returns "OK" if the node is alive.
+  Example:
+  curl http://localhost:9090/health
+
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 How does your system handle network partitions?
 - In the event of a network partition, the system will continue to operate as normal on the isolated partition.
