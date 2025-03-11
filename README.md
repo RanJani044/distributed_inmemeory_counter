@@ -1,8 +1,7 @@
  Service Directory
 
-- This project implements a distributed counter system where multiple nodes increment a shared counter and propagate the increment operation to other nodes in the system.
-- It provides eventual consistency by ensuring that all nodes eventually converge to the same counter value.
-
+- This project implements a system where multiple nodes increment a shared counter and sync these changes across all nodes.
+- It ensures that, over time, all nodes will have the same counter value, achieving eventual consistency
 
  Design Decisions
 
