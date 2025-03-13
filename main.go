@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -10,16 +11,21 @@ import (
 )
 
 type Node struct {
-	ID       string
-	Peers    map[string]*Node
-	Mutex    sync.Mutex
-	LastPing time.Time
+	ID          string
+	Peers       map[string]*Node
+	Mutex       sync.Mutex
+	LastPing    time.Time
+	FailedPeers map[string]int
+	Counter     *Counter
 }
 
 func NewNode(id string) *Node {
+	counter := NewCounter(nil)
 	return &Node{
-		ID:    id,
-		Peers: make(map[string]*Node),
+		ID:          id,
+		Peers:       make(map[string]*Node),
+		FailedPeers: make(map[string]int),
+		Counter:     counter,
 	}
 }
 
@@ -36,13 +42,39 @@ func (node *Node) Heartbeat() {
 	// Periodically check the status of all peers
 	time.Sleep(30 * time.Second)
 	for {
-		time.Sleep(10 * time.Second) // Heartbeat interval
+		time.Sleep(10 * time.Second)
 		node.Mutex.Lock()
-		fmt.Println("checking the heart beat")
+
+		if len(node.Peers) == 0 {
+			fmt.Println("No peers to check.")
+			node.Mutex.Unlock()
+			continue
+		}
+		// Make a snapshot of peers list to avoid modifying the map while iterating
+		peersCopy := make([]*Node, 0, len(node.Peers))
 		for _, peer := range node.Peers {
-			go node.checkPeerStatus(peer)
+			if peer != nil {
+				peersCopy = append(peersCopy, peer)
+
+			}
 		}
 		node.Mutex.Unlock()
+
+		// Check the status of each peer in the snapshot
+		for _, peer := range peersCopy {
+			if peer == nil {
+				fmt.Println("Warning: Peer is nil, skipping.")
+				continue
+			}
+			go func(p *Node) {
+				defer func() {
+					if r := recover(); r != nil {
+						fmt.Printf("Recovered from panic in heartbeat for peer %s: %v\n", p.ID, r)
+					}
+				}()
+				node.checkPeerStatus(p)
+			}(peer)
+		}
 	}
 }
 
@@ -52,7 +84,6 @@ func (node *Node) checkPeerStatus(peer *Node) {
 		return
 	}
 
-	// Construct correct URL
 	peerAddress := peer.ID
 	if !strings.Contains(peerAddress, "localhost") {
 		peerAddress = "localhost:" + peerAddress
@@ -62,15 +93,64 @@ func (node *Node) checkPeerStatus(peer *Node) {
 	fmt.Println("Checking peer health at:", url)
 
 	resp, err := http.Get(url)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		// If the peer is unresponsive, remove it from the peer list
-		fmt.Printf("Peer %s is unresponsive (StatusCode: %d). Removing from peers.\n", peer.ID, resp.StatusCode)
+
+	if err != nil {
+		fmt.Printf("Error checking peer health: %v\n", err)
+	}
+
+	var maxretry = 3
+	if resp == nil {
+		fmt.Printf("Peer  is unresponsive. Removing from peers.\n")
 		node.Mutex.Lock()
-		delete(node.Peers, peer.ID)
+		if _, exists := node.Peers[peer.ID]; exists {
+			delete(node.Peers, peer.ID)
+		}
 		node.Mutex.Unlock()
+		node.retryFailedPeer(peer, maxretry)
+
+		//return
 	} else {
 		fmt.Printf("Peer %s is healthy!\n", peer.ID)
 	}
+
+}
+
+func (node *Node) retryFailedPeer(peer *Node, maxRetries int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("Recovered from panic after retries: %v\n", r)
+		}
+	}()
+	// Retry logic with a maximum of 2 attempts
+	attempts := 1
+	for attempts <= maxRetries {
+		time.Sleep(time.Duration(math.Pow(2, float64(attempts))) * time.Second)
+		fmt.Printf("Retrying peer %s (attempt %d)...\n", peer.ID, attempts)
+
+		peerAddress := peer.ID
+		if !strings.Contains(peerAddress, "localhost") {
+			peerAddress = "localhost:" + peerAddress
+		}
+		url := "http://" + peerAddress + "/health"
+		resp, err := http.Get(url)
+		if err == nil && resp.StatusCode == http.StatusOK {
+			fmt.Printf("Peer %s successfully reconnected!\n", peer.ID)
+			return
+		}
+		attempts++
+	}
+
+	// After maxRetries, peer is still unresponsive, so remove it and trigger count
+	fmt.Printf("Peer %s failed to reconnect after %d attempts. Removing from peers.\n", peer.ID, maxRetries)
+	node.Mutex.Lock()
+	if _, exists := node.Peers[peer.ID]; exists {
+		delete(node.Peers, peer.ID)
+	}
+	node.Mutex.Unlock()
+
+	// Trigger count update after deleting the peer
+	currentCount := node.Counter.GetCount()
+	fmt.Printf("Peer  removed. Current counter value: %d\n", currentCount)
 }
 
 func (node *Node) GetPeers() []string {
@@ -114,19 +194,21 @@ func (counter *Counter) Increment() {
 }
 
 func (counter *Counter) propagateIncrement(peer *Node) {
-	// Check if peer.ID contains "localhost:" or just the port
-	peerAddress := peer.ID // This should already be "localhost:port"
+	if peer == nil {
+		fmt.Println("Warning: Peer is nil, skipping.")
+		return
+	}
+	peerAddress := peer.ID
 	if !strings.Contains(peerAddress, "localhost") {
-		// If it's just a port number, prepend localhost:
 		peerAddress = "localhost:" + peerAddress
 	}
 
-	// Now the correct URL is formed
 	url := "http://" + peerAddress + "/increment"
-	fmt.Println("Checking URL:", url)
 	resp, err := http.Post(url, "application/json", nil)
 	if err != nil || resp.StatusCode != http.StatusOK {
 		fmt.Printf("Failed to propagate increment to peer %s: %v\n", peer.ID, err)
+		time.Sleep(2 * time.Second)
+		counter.propagateIncrement(peer)
 	} else {
 		fmt.Printf("Successfully propagated increment to peer %s\n", peer.ID)
 	}
@@ -142,29 +224,24 @@ func (counter *Counter) StartAPI(port string) {
 	http.HandleFunc("/count", counter.GetCountHandler)
 	http.HandleFunc("/health", counter.HealthCheck)
 
-	// Start the HTTP server
 	fmt.Println("Starting server on port", port)
 	http.ListenAndServe(":"+port, nil)
 }
 
 func (counter *Counter) IncrementHandler(w http.ResponseWriter, r *http.Request) {
-	// Handle the increment request
 	counter.Increment()
 	w.Write([]byte("Incremented successfully"))
 }
 
 func (counter *Counter) GetCountHandler(w http.ResponseWriter, r *http.Request) {
-	// Return the current counter value
 	w.Write([]byte(fmt.Sprintf("Current Counter: %d", counter.GetCount())))
 }
 
 func (counter *Counter) HealthCheck(w http.ResponseWriter, r *http.Request) {
-	// Health check to ensure the node is alive
 	w.Write([]byte("OK"))
 }
 
 func registerNewNode(existingNode *Node, newNodePort string) {
-	// Register a new node with the existing node
 	fmt.Printf("Registering new node %s to existing node %s\n", newNodePort, existingNode.ID)
 	existingNode.RegisterPeers([]string{newNodePort})
 }
@@ -186,26 +263,21 @@ func main() {
 		node.RegisterPeers(initialPeers)
 	}
 
-	// Create counter for the node
 	counter := NewCounter(node)
 
-	// Start API server for counter operations
 	go counter.StartAPI(*port)
 
-	// Start heartbeat mechanism
 	go node.Heartbeat()
 
 	// If a new node is provided, register it dynamically
 	if *newNodePort != "" {
 		// Create a new node and register it to the existing cluster
 		newNode := NewNode(*newNodePort)
-		//counterNewNode := NewCounter(newNode)
 		go newNode.Heartbeat()
 
 		// Register new node with the existing cluster
 		registerNewNode(node, *newNodePort)
 
-		// Handle the new peer addition and propagate the counter increment
 		handleNewPeer(counter, *newNodePort)
 	}
 
@@ -213,7 +285,6 @@ func main() {
 	select {}
 }
 
-// Function to handle a new peer being added dynamically
 func handleNewPeer(counter *Counter, newPeerID string) {
 	// Add the new peer dynamically
 	counter.Node.Mutex.Lock()
@@ -222,5 +293,5 @@ func handleNewPeer(counter *Counter, newPeerID string) {
 
 	// Increment the counter when a new peer joins
 	fmt.Printf("New peer added: %s\n", newPeerID)
-	counter.Increment() // Increment the counter and propagate the change
+	counter.Increment()
 }
